@@ -51,6 +51,11 @@ def generate_embeddings(
         normalize_embeddings=NORMALIZE_EMBEDDINGS,
         convert_to_numpy=True,
     )
+    if len(vectors) != len(chunks):
+        raise ValueError(
+            "Embedding count does not match chunk count: "
+            f"received {len(vectors)} embeddings for {len(chunks)} chunks."
+        )
 
     embedded_chunks = []
     for chunk, vector in zip(chunks, vectors):

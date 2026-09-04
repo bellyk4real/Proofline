@@ -23,6 +23,21 @@ class _FakeModel:
         return np.ones((len(texts), self.dimension), dtype=np.float32)
 
 
+class _MismatchedCountModel(_FakeModel):
+    """Embedding fixture that returns a configurable number of vectors."""
+
+    def __init__(self, vector_count: int) -> None:
+        super().__init__()
+        self.vector_count = vector_count
+
+    def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
+        self.encode_kwargs = kwargs
+        return np.ones(
+            (self.vector_count, self.dimension),
+            dtype=np.float32,
+        )
+
+
 def test_default_model_configuration() -> None:
     assert MODEL_NAME == "all-MiniLM-L6-v2"
     assert EMBEDDING_DIMENSION == 384
@@ -63,4 +78,13 @@ def test_rejects_unexpected_embedding_dimension() -> None:
     chunks = [{"content": "A semantic chunk."}]
 
     with pytest.raises(ValueError, match="384-dimensional"):
+        generate_embeddings(chunks, model)
+
+
+@pytest.mark.parametrize("vector_count", [0, 2])
+def test_rejects_embedding_chunk_count_mismatch(vector_count: int) -> None:
+    model = _MismatchedCountModel(vector_count)
+    chunks = [{"content": "A semantic chunk."}]
+
+    with pytest.raises(ValueError, match="Embedding count"):
         generate_embeddings(chunks, model)
