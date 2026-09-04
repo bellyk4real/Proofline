@@ -16,13 +16,18 @@ import retriever
 from quadrant_client import EMBEDDING_DIMENSION
 from retriever import (
     DEFAULT_TOP_K,
+    HYBRID_FETCH_LIMIT,
+    RRF_K,
     Retriever,
     build_filter,
     format_chunk,
     format_context,
     get_retriever,
+    hybrid_search,
+    keyword_search,
     reset_default_retriever,
     retrieve,
+    semantic_search,
 )
 
 EMBEDDING = [1.0] * EMBEDDING_DIMENSION
@@ -98,6 +103,123 @@ def test_retrieves_chunk_records_with_id_and_content() -> None:
             "metadata": {"page_number": 3},
         }
     ]
+
+
+def test_keyword_search_returns_ranked_chunk_ids_and_scores() -> None:
+    client = Mock()
+    client.scroll.return_value = (
+        [
+            make_hit(
+                point_id="point-1",
+                score=0.0,
+                chunk_id="sample.pdf:0",
+            ),
+            Mock(
+                id="point-2",
+                payload={
+                    "id": "sample.pdf:1",
+                    "source_filename": "sample.pdf",
+                    "original_text": "Relevant relevant text.",
+                    "metadata": {"page_number": 4},
+                },
+            ),
+        ],
+        None,
+    )
+
+    results = Retriever(client, make_model()).keyword_search(
+        "relevant", k=2
+    )
+
+    assert [result["id"] for result in results] == [
+        "sample.pdf:1",
+        "sample.pdf:0",
+    ]
+    assert all(isinstance(result["score"], float) for result in results)
+    assert results[0]["score"] > results[1]["score"]
+    client.scroll.assert_called_once()
+
+
+def test_keyword_search_uses_module_level_api() -> None:
+    client = Mock()
+    client.scroll.return_value = ([], None)
+    get_retriever(client=client, model=make_model())
+
+    assert keyword_search("exact term", k=3) == []
+    assert client.scroll.call_args.kwargs["collection_name"] == "test_chunks"
+
+
+def test_retrieve_uses_hybrid_search_as_stable_wrapper() -> None:
+    client = Mock()
+    instance = get_retriever(client=client, model=make_model())
+    instance.hybrid_search = Mock(
+        return_value=[{"id": "chunk-1", "content": "text", "score": 0.02}]
+    )
+
+    results = retrieve("query", k=2)
+
+    assert results == [{"id": "chunk-1", "content": "text", "score": 0.02}]
+    instance.hybrid_search.assert_called_once_with(
+        "query", k=2, filters=None
+    )
+
+
+def test_semantic_search_remains_available_for_comparison() -> None:
+    client = Mock()
+    instance = get_retriever(client=client, model=make_model())
+    instance.retrieve = Mock(
+        return_value=[{"id": "chunk-1", "content": "text", "score": 0.9}]
+    )
+
+    assert semantic_search("query", k=2) == [
+        {"id": "chunk-1", "content": "text", "score": 0.9}
+    ]
+    instance.retrieve.assert_called_once_with("query", k=2, filters=None)
+
+
+def test_hybrid_search_fuses_rankings_with_reciprocal_rank_fusion() -> None:
+    instance = Retriever(Mock(), make_model())
+    semantic_results = [
+        {"id": "chunk-a", "content": "A", "score": 0.9},
+        {"id": "chunk-b", "content": "B", "score": 0.8},
+    ]
+    keyword_results = [
+        {"id": "chunk-b", "content": "B", "score": 4.0},
+        {"id": "chunk-c", "content": "C", "score": 3.0},
+    ]
+    instance.retrieve = Mock(return_value=semantic_results)
+    instance.keyword_search = Mock(return_value=keyword_results)
+
+    results = instance.hybrid_search("query", k=3)
+
+    expected_scores = {
+        "chunk-a": 1 / (RRF_K + 1),
+        "chunk-b": 1 / (RRF_K + 2) + 1 / (RRF_K + 1),
+        "chunk-c": 1 / (RRF_K + 2),
+    }
+    assert [result["id"] for result in results] == [
+        "chunk-b",
+        "chunk-a",
+        "chunk-c",
+    ]
+    assert [result["score"] for result in results] == [
+        expected_scores[result["id"]] for result in results
+    ]
+    instance.retrieve.assert_called_once_with(
+        "query", k=HYBRID_FETCH_LIMIT, filters=None
+    )
+    instance.keyword_search.assert_called_once_with(
+        "query", k=HYBRID_FETCH_LIMIT, filters=None
+    )
+
+
+def test_hybrid_search_uses_module_level_api() -> None:
+    client = Mock()
+    client.query_points.return_value.points = []
+    client.scroll.return_value = ([], None)
+    get_retriever(client=client, model=make_model())
+
+    assert hybrid_search("query", k=3) == []
 
 
 def test_searches_configured_collection_with_query_embedding() -> None:
@@ -194,6 +316,7 @@ def test_formats_chunk_from_hit_without_payload() -> None:
 def test_shared_retriever_is_reused_across_calls() -> None:
     client = Mock()
     client.query_points.return_value.points = []
+    client.scroll.return_value = ([], None)
     get_retriever(client=client, model=make_model())
 
     retrieve("first question", k=1)

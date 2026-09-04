@@ -15,6 +15,8 @@ Every returned record always carries at least ``id`` and ``content``.
 
 import argparse
 import json
+import math
+import re
 from typing import Any
 
 from qdrant_client import QdrantClient
@@ -34,6 +36,9 @@ from quadrant_client import (
 )
 
 DEFAULT_TOP_K = QDRANT_TOP_K
+HYBRID_FETCH_LIMIT = 50
+RRF_K = 60
+TOKEN_PATTERN = re.compile(r"\b\w+\b")
 
 # Module-level retriever shared by the public retrieve() function, so the
 # embedding model is loaded at most once per process. Access it through
@@ -109,6 +114,73 @@ def format_chunk(result: dict[str, Any]) -> dict[str, Any]:
         "point_id": point_id,
         "metadata": metadata,
     }
+
+
+def _tokenize(text: str) -> list[str]:
+    """Return lowercase word tokens for lexical matching."""
+    return TOKEN_PATTERN.findall(text.lower())
+
+
+def _scroll_points(
+    client: QdrantClient,
+    collection_name: str,
+    query_filter: Filter | None,
+) -> list[Any]:
+    """Read all payload-bearing points from a Qdrant collection."""
+    points = []
+    offset = None
+    while True:
+        scroll_kwargs: dict[str, Any] = {
+            "collection_name": collection_name,
+            "limit": 100,
+            "with_payload": True,
+            "with_vectors": False,
+        }
+        if query_filter is not None:
+            scroll_kwargs["scroll_filter"] = query_filter
+        page, offset = client.scroll(offset=offset, **scroll_kwargs)
+        points.extend(page)
+        if offset is None:
+            return points
+
+
+def _keyword_score(
+    query_terms: list[str],
+    documents: list[list[str]],
+) -> list[float]:
+    """Score documents with a small BM25 implementation."""
+    document_count = len(documents)
+    if document_count == 0:
+        return []
+    average_length = sum(map(len, documents)) / document_count or 1
+    document_frequency: dict[str, int] = {}
+    for terms in documents:
+        for term in set(terms):
+            document_frequency[term] = document_frequency.get(term, 0) + 1
+
+    scores = []
+    for terms in documents:
+        term_frequency: dict[str, int] = {}
+        for term in terms:
+            term_frequency[term] = term_frequency.get(term, 0) + 1
+        score = 0.0
+        for term in query_terms:
+            frequency = term_frequency.get(term, 0)
+            if not frequency:
+                continue
+            inverse_frequency = math.log(
+                1
+                + (document_count - document_frequency[term] + 0.5)
+                / (document_frequency[term] + 0.5)
+            )
+            normalization = 1.2 * (
+                1 - 0.75 + 0.75 * len(terms) / average_length
+            )
+            score += inverse_frequency * (frequency * 2.2) / (
+                frequency + normalization
+            )
+        scores.append(score)
+    return scores
 
 
 def format_context(
@@ -234,6 +306,93 @@ class Retriever:
         )
         return [format_chunk(result) for result in results]
 
+    def keyword_search(
+        self,
+        query: str,
+        k: int = DEFAULT_TOP_K,
+        filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return chunks ranked by exact keyword matches using BM25."""
+        if not query.strip():
+            raise ValueError("query must not be empty.")
+        if k <= 0:
+            raise ValueError("k must be greater than zero.")
+
+        query_terms = _tokenize(query)
+        if not query_terms:
+            return []
+        raw_points = _scroll_points(
+            self._get_client(),
+            self.collection_name,
+            build_filter(filters),
+        )
+        raw_results = []
+        documents = []
+        for point in raw_points:
+            payload = point.payload or {}
+            content = payload.get("original_text", "")
+            if not isinstance(content, str):
+                continue
+            terms = _tokenize(content)
+            if any(term in terms for term in query_terms):
+                raw_results.append(
+                    {
+                        "id": point.id,
+                        "score": 0.0,
+                        "text": content,
+                        "payload": payload,
+                    }
+                )
+                documents.append(terms)
+
+        scores = _keyword_score(query_terms, documents)
+        ranked_results = [
+            (score, result)
+            for score, result in zip(scores, raw_results, strict=True)
+        ]
+        ranked_results.sort(
+            key=lambda item: (-item[0], str(item[1]["id"])),
+        )
+        return [
+            format_chunk({**result, "score": score})
+            for score, result in ranked_results[:k]
+        ]
+
+    def hybrid_search(
+        self,
+        query: str,
+        k: int = DEFAULT_TOP_K,
+        filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fuse semantic and keyword rankings with reciprocal rank fusion."""
+        if not query.strip():
+            raise ValueError("query must not be empty.")
+        if k <= 0:
+            raise ValueError("k must be greater than zero.")
+
+        rankings = (
+            self.retrieve(query, k=HYBRID_FETCH_LIMIT, filters=filters),
+            self.keyword_search(query, k=HYBRID_FETCH_LIMIT, filters=filters),
+        )
+        fused: dict[Any, dict[str, Any]] = {}
+        fused_scores: dict[Any, float] = {}
+        for ranking in rankings:
+            for rank, chunk in enumerate(ranking, start=1):
+                chunk_id = chunk["id"]
+                fused_scores[chunk_id] = fused_scores.get(chunk_id, 0.0) + (
+                    1 / (RRF_K + rank)
+                )
+                fused.setdefault(chunk_id, chunk)
+
+        ranked_chunks = sorted(
+            fused,
+            key=lambda chunk_id: (-fused_scores[chunk_id], str(chunk_id)),
+        )
+        return [
+            {**fused[chunk_id], "score": fused_scores[chunk_id]}
+            for chunk_id in ranked_chunks[:k]
+        ]
+
 
 def get_retriever(
     client: QdrantClient | None = None,
@@ -273,10 +432,10 @@ def retrieve(
     k: int = DEFAULT_TOP_K,
     filters: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Returns the k chunks most similar to a question.
+    """Return hybrid-ranked chunks for downstream consumers.
 
-    This is the stable entry point for downstream projects. It reuses one
-    shared Retriever, so the embedding model is loaded once per process.
+    This stable entry point reuses one shared Retriever, so downstream
+    projects do not need to know how semantic and keyword rankings are fused.
 
     Args:
         query: Natural-language question.
@@ -291,7 +450,34 @@ def retrieve(
     Raises:
         ValueError: If the query is empty or k is not positive.
     """
+    return get_retriever().hybrid_search(query, k=k, filters=filters)
+
+
+def semantic_search(
+    query: str,
+    k: int = DEFAULT_TOP_K,
+    filters: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return chunks ranked by vector similarity only."""
     return get_retriever().retrieve(query, k=k, filters=filters)
+
+
+def keyword_search(
+    query: str,
+    k: int = DEFAULT_TOP_K,
+    filters: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return chunks ranked by sparse keyword relevance."""
+    return get_retriever().keyword_search(query, k=k, filters=filters)
+
+
+def hybrid_search(
+    query: str,
+    k: int = DEFAULT_TOP_K,
+    filters: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return chunks ranked by fused semantic and keyword relevance."""
+    return get_retriever().hybrid_search(query, k=k, filters=filters)
 
 
 def parse_args() -> argparse.Namespace:
@@ -305,6 +491,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("query", help="Question to search for.")
     parser.add_argument(
+        "--mode",
+        choices=("semantic", "keyword", "hybrid"),
+        default="semantic",
+        help="Search mode to use.",
+    )
+    parser.add_argument(
         "-k",
         type=int,
         default=DEFAULT_TOP_K,
@@ -316,7 +508,13 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """Runs one search and prints the chunk records as JSON."""
     args = parse_args()
-    chunks = retrieve(args.query, k=args.k)
+    searchers = {
+        "semantic": semantic_search,
+        "keyword": keyword_search,
+        "hybrid": hybrid_search,
+    }
+    search = searchers[args.mode]
+    chunks = search(args.query, k=args.k)
     print(json.dumps(chunks, indent=2, ensure_ascii=False))
 
 
