@@ -1,0 +1,58 @@
+[
+  {
+    "id": "exchange-rate-usd",
+    "question": "What was the euro exchange rate for the US dollar on 2 September 2026?",
+    "expected_source_filename": "C_202604597EN.pdf",
+    "expected_topic_label": "EU_Regulation",
+    "answer_keywords": ["USD", "1.1578", "1,1578", "ECB"]
+  },
+  {
+    "id": "forced-labour-regulation",
+    "question": "Which EU regulation do the Commission guidelines address concerning products made with forced labour?",
+    "expected_source_filename": "C_202604637EN.pdf",
+    "expected_topic_label": "EU_Regulation",
+    "answer_keywords": ["2024/3015", "forced labour", "Union market"]
+  },
+  {
+    "id": "forced-labour-scope",
+    "question": "What is the subject of the Commission Notice on forced labour products on the Union market?",
+    "expected_source_filename": "C_202604637EN.pdf",
+    "expected_topic_label": "EU_Regulation",
+    "answer_keywords": ["guidelines", "prohibiting", "forced labour"]
+  },
+  {
+    "id": "business-indicator-mapping",
+    "question": "How are business indicator components mapped to supervisory reporting references?",
+    "expected_source_filename": "L_202601166EN.pdf",
+    "expected_topic_label": "EU_Regulation",
+    "answer_keywords": ["FINREP", "corresponding cells", "2024/3117"]
+  },
+  {
+    "id": "operational-risk-proxy",
+    "question": "What is the business indicator used as a proxy for in the operational risk requirements?",
+    "expected_source_filename": "L_202601167EN.pdf",
+    "expected_topic_label": "EU_Regulation",
+    "answer_keywords": ["financial statement", "operational risk"]
+  },
+  {
+    "id": "operational-risk-components",
+    "question": "Which income and expense categories should institutions include in the interest, leases and dividend component?",
+    "expected_source_filename": "L_202601167EN.pdf",
+    "expected_topic_label": "EU_Regulation",
+    "answer_keywords": ["interest income", "interest expenses", "financial leases", "operating leases"]
+  },
+  {
+    "id": "brake-test-standard",
+    "question": "Which UN regulation replaces UN Global Technical Regulation No 24 for testing brake emissions from light-duty vehicles?",
+    "expected_source_filename": "L_202601214EN.pdf",
+    "expected_topic_label": "EU_Regulation",
+    "answer_keywords": ["UN Regulation No 179", "brake emissions", "light-duty vehicles"]
+  },
+  {
+    "id": "brake-test-vehicle-categories",
+    "question": "Which vehicle categories are covered by the harmonised brake-emissions testing standard?",
+    "expected_source_filename": "L_202601214EN.pdf",
+    "expected_topic_label": "EU_Regulation",
+    "answer_keywords": ["M1", "N1", "Euro 7ext"]
+  }
+]
