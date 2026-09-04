@@ -1,13 +1,19 @@
 """Utilities for splitting extracted PDF pages by semantic boundaries."""
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Literal
 
 from langchain_core.embeddings import Embeddings
 from langchain_experimental.text_splitter import SemanticChunker
+from dotenv import load_dotenv
 
-DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+load_dotenv()
+
+DEFAULT_EMBEDDING_MODEL = os.environ["EMBEDDING_MODEL_NAME"]
+DEFAULT_BREAKPOINT_THRESHOLD = os.environ["BREAKPOINT_THRESHOLD_TYPE"]
+CHUNKING_METHOD = os.environ["CHUNKING_METHOD"]
 BreakpointThresholdType = Literal[
     "percentile", "standard_deviation", "gradient"
 ]
@@ -30,7 +36,9 @@ def create_embeddings(model_name: str = DEFAULT_EMBEDDING_MODEL) -> Embeddings:
 def semantic_chunk_pages(
     pages: list[dict[str, Any]],
     embeddings: Embeddings | None = None,
-    breakpoint_threshold_type: BreakpointThresholdType = "percentile",
+    breakpoint_threshold_type: BreakpointThresholdType = (
+        DEFAULT_BREAKPOINT_THRESHOLD  # type: ignore[assignment]
+    ),
 ) -> list[dict[str, Any]]:
     """Split extracted pages into semantically coherent chunks.
 
@@ -81,7 +89,7 @@ def semantic_chunk_pages(
             content = document.page_content
             chunk_metadata = {
                 **document.metadata,
-                "chunking_method": "semantic",
+                "chunking_method": CHUNKING_METHOD,
                 "source_filename": source_filename,
                 "source": document.metadata.get("source", source_filename),
                 "page_number": document.metadata.get("page_number"),
